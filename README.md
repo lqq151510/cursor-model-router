@@ -1,14 +1,16 @@
 # Cursor Model Router
 
-A model router for **Cursor only**. Cursor sends OpenAI Chat Completions requests to this service; the router selects an upstream provider by the custom model name, applies optional context/reasoning presets, and translates supported protocol formats.
+A model router for **Cursor only**. Cursor sends OpenAI Chat Completions requests to this service; the router selects an upstream provider by the custom model name, applies optional context/reasoning presets, and translates supported protocol formats. The bundled Cursor extension adds a compact status-bar picker for presets, so context and reasoning choices do not need separate model names.
 
 - Upstream protocols: OpenAI Chat Completions compatible APIs and Anthropic Messages.
 - Example providers: DeepSeek, Alibaba DashScope/Qwen, Zhipu/GLM, Moonshot/Kimi, MiniMax, Tencent Hunyuan, and Anthropic-compatible APIs.
 - The server binds to `127.0.0.1` by default and does not log request bodies or authorization headers.
-- Provider keys come from `.env` environment variables. The API key sent by Cursor is used only as a fallback when a model has no `api_key_env` value; it can also serve as the public router bearer token.
+- Provider keys come from `.env` environment variables. When a configured provider key is empty, the router can forward the API key Cursor sends; this supports DeepSeek's direct-key setup. For public access, configure the router bearer token and upstream keys separately where needed.
+- `/v1/models` only advertises models allowed by the local config and configured API keys. Example providers stay hidden until their key exists.
+- The extension's status-bar Quick Pick updates a local selection file; the gateway applies that selection when Cursor sends the model's base alias.
 - Context limits are local budgets. They use the DeepSeek tokenizer when installed; other tokenizers fall back to a conservative UTF-8 byte estimate. The upstream provider remains authoritative and may reject a request.
 
-> This is not a provider SDK. Provider model IDs, endpoints, supported parameters, rate limits and context sizes change. Check the provider's current official documentation before enabling a profile. A custom profile is visible in Cursor even when its key is not configured.
+> This is not a provider SDK. Provider model IDs, endpoints, supported parameters, rate limits and context sizes change. Check the provider's current official documentation before enabling a profile. The router hides profiles whose required API key is missing; older custom entries that were manually added to Cursor must be disabled once in **Settings → Models**.
 
 ## Quick start (macOS/Linux)
 
@@ -36,6 +38,7 @@ For local development, use `curl` against the loopback health and models routes.
 2. Restart the gateway so it requires that token for every chat completion request.
 3. Start a tunnel only after the authenticated endpoint is ready. `scripts/start-public-tunnel.sh` starts a temporary Cloudflare quick tunnel to the loopback server; Cloudflare carries requests to this computer, which must stay online.
 4. Put the same token in Cursor's OpenAI API Key field and set Base URL to the HTTPS URL printed by `cloudflared`, ending in `/v1`.
+5. In Cursor, run **Cursor Model Router: Set Local Router Token** once so the extension can authenticate preset changes against the same router.
 
 The Cursor key is then the router access token. For DeepSeek, either use that same token as the DeepSeek key, or set `DEEPSEEK_API_KEY` in `.env`. Other upstream provider keys belong in their named `.env` variables. The router checks the bearer token before forwarding requests. Never expose the service without authentication.
 
@@ -45,10 +48,11 @@ The quick tunnel URL is temporary and changes when restarted. It is intended for
 
 1. Open **Settings → Models → API Keys** and keep OpenAI-compatible model access enabled.
 2. Set the OpenAI Base URL to your public HTTPS tunnel URL, ending in `/v1`.
-3. In **Settings → Models**, add the model alias IDs from `config.toml` (for example `deepseek-flash-256k-high` or `qwen-example`).
-4. Select the alias in Cursor's model picker.
+3. In **Settings → Models**, add one base model alias for each configured provider (for example `deepseek-flash`). Do not add the hidden `deepseek-flash-256k-*` compatibility aliases.
+4. Build the dependency-free extension package with `python3 scripts/package_cursor_extension.py`, then use Cursor's **Install from VSIX** command to install the generated `.vsix` file.
+5. In the Cursor editor window, click **模型档位** on the status bar (or run **Cursor Model Router: Edit Model Profile**) and choose the model, context, and reasoning effort. Then choose the same base model in Cursor's model picker.
 
-Cursor currently offers no native context-size control for custom BYOK models. The aliases provide selectable profiles in its model picker. The router trims oldest complete user turns when needed, while retaining system/developer messages and the latest user turn. If the current prompt itself exceeds the selected budget, the router returns a clear 400 response instead of silently truncating the latest request.
+Cursor currently does not expose a public extension API for adding a custom context/reasoning editor directly inside its built-in model picker. The extension provides a nearby status-bar picker in the Cursor editor window. Cursor's separate Agents window may not show editor extensions; in that window the base model still must be selected with Cursor's own picker. The router trims oldest complete user turns when needed, while retaining system/developer messages and the latest user turn. If the current prompt itself exceeds the selected budget, the router returns a clear 400 response instead of silently truncating the latest request.
 
 ## Providers and protocol adapters
 
@@ -82,12 +86,16 @@ The converter handles text, image URLs/data URLs, function tools, reasoning effo
 
 ### DeepSeek presets
 
-`config.example.toml` includes 12 aliases across:
+The `deepseek-flash` base alias provides a selectable profile across:
 
 - Context budgets: `256k`, `512k`, `1m`
 - Reasoning: `low`, `high`, `max`, `fast`
 
-`fast` means DeepSeek non-thinking mode; it is not Cursor's proprietary Fast tier. The selected context value reserves output tokens and applies a 5% safety margin. Token counting is an estimate, especially for images and tool schemas.
+`fast` means DeepSeek non-thinking mode; it is not Cursor's proprietary Fast tier. The selected context value reserves output tokens and applies a 5% safety margin. Token counting is an estimate, especially for images and tool schemas. Compatibility aliases remain in the example config for older chats but are hidden from the advertised model list.
+
+### Cursor extension
+
+`cursor-extension/` contains a dependency-free VS Code extension that runs in Cursor's editor window. It reads configured profiles from `GET /v1/router/profiles` and writes the selected profile to `POST /v1/router/selection`. The selection endpoint uses the same optional bearer-token check as chat requests. When no API key is configured for a model marked `requires_api_key`, the model is hidden from both the selector and `/v1/models`.
 
 ## Run as a macOS LaunchAgent
 

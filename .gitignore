@@ -8,3 +8,4 @@ __pycache__/
 .deepseek-tokenizer-config.json
 service.log
 .DS_Store
+*.vsix

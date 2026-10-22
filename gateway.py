@@ -44,6 +44,11 @@ GATEWAY_TOKEN_ENV = str(CONFIG.get("server", {}).get("gateway_token_env", ""))
 TOKENIZER_FILE = Path(CONFIG.get("tokenizer_path", ".deepseek-tokenizer.json"))
 if not TOKENIZER_FILE.is_absolute():
     TOKENIZER_FILE = ROOT / TOKENIZER_FILE
+SELECTION_FILE = Path(
+    CONFIG.get("server", {}).get(
+        "selection_file", "~/.config/cursor-model-router/selection.json"
+    )
+).expanduser()
 
 try:
     from tokenizers import Tokenizer
@@ -135,6 +140,50 @@ def _fit_context(body: dict[str, object], context_limit: int, output_reserve: in
 
 def json_bytes(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=False).encode("utf-8")
+
+
+def _model_available(preset: dict[str, object]) -> bool:
+    """Only advertise configured models; Cursor-key fallback is explicit."""
+    if preset.get("hidden_from_picker", False):
+        return False
+    key_name = str(preset.get("api_key_env", ""))
+    if preset.get("requires_api_key", False):
+        return bool(key_name and os.environ.get(key_name))
+    if key_name and os.environ.get(key_name):
+        return True
+    return bool(preset.get("cursor_api_key_fallback", False))
+
+
+def _read_selection() -> dict[str, object]:
+    try:
+        selection = json.loads(SELECTION_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return selection if isinstance(selection, dict) else {}
+
+
+def _effective_preset(alias: str, preset: dict[str, object]) -> dict[str, object]:
+    """Apply the locally selected context and reasoning to one base model ID."""
+    effective = dict(preset)
+    selection = _read_selection()
+    if selection.get("model") != alias:
+        return effective
+
+    context_options = preset.get("context_options", [])
+    selected_context = selection.get("context_tokens")
+    if isinstance(context_options, list) and selected_context in context_options:
+        effective["context_tokens"] = int(selected_context)
+
+    effort_options = preset.get("reasoning_options", [])
+    selected_effort = selection.get("reasoning_effort")
+    if isinstance(effort_options, list) and selected_effort in effort_options:
+        if selected_effort == "fast":
+            effective["thinking"] = False
+            effective.pop("reasoning_effort", None)
+        else:
+            effective["thinking"] = True
+            effective["reasoning_effort"] = selected_effort
+    return effective
 
 
 def _anthropic_request(body: dict[str, object], model: str) -> dict[str, object]:
@@ -266,16 +315,84 @@ class GatewayHandler(BaseHTTPRequestHandler):
         if self.path in ("/health", "/healthz"):
             self._send_json(200, {"ok": True, "service": "cursor-model-router"})
             return
+        if self.path.rstrip("/") == "/v1/router/profiles":
+            profiles = []
+            for alias, preset in MODEL_PRESETS.items():
+                if preset.get("selector_enabled") and _model_available(preset):
+                    profiles.append({
+                        "id": alias,
+                        "label": str(preset.get("display_name", alias)),
+                        "context_options": preset.get("context_options", [preset.get("context_tokens", 1_048_576)]),
+                        "default_context_tokens": int(preset.get("context_tokens", 1_048_576)),
+                        "reasoning_options": preset.get("reasoning_options", []),
+                        "default_reasoning_effort": preset.get("reasoning_effort", "high") if preset.get("reasoning_options") else "",
+                    })
+            self._send_json(200, {"data": profiles})
+            return
+        if self.path.rstrip("/") == "/v1/router/selection":
+            selection = _read_selection()
+            preset = MODEL_PRESETS.get(selection.get("model")) if isinstance(selection.get("model"), str) else None
+            if not isinstance(preset, dict) or not _model_available(preset):
+                selection = {}
+            self._send_json(200, {"data": selection})
+            return
         if self.path.rstrip("/") == "/v1/models":
             models = [
                 {"id": alias, "object": "model", "owned_by": "cursor-model-router"}
-                for alias in MODEL_PRESETS
+                for alias, preset in MODEL_PRESETS.items()
+                if _model_available(preset)
             ]
             self._send_json(200, {"object": "list", "data": models})
             return
         self._send_json(404, {"error": {"message": "Not found"}})
 
     def do_POST(self) -> None:
+        if self.path == "/v1/router/selection":
+            if not self._authorized():
+                self._send_json(401, {"error": {"message": "Invalid or missing gateway bearer token"}})
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if length <= 0 or length > 8192:
+                    self._send_json(413, {"error": {"message": "Selection body is empty or too large"}})
+                    return
+                selection = json.loads(self.rfile.read(length))
+            except (ValueError, json.JSONDecodeError, UnicodeDecodeError):
+                self._send_json(400, {"error": {"message": "Selection must be valid JSON"}})
+                return
+            if not isinstance(selection, dict):
+                self._send_json(400, {"error": {"message": "Selection must be a JSON object"}})
+                return
+            alias = selection.get("model")
+            preset = MODEL_PRESETS.get(alias) if isinstance(alias, str) else None
+            if not isinstance(preset, dict) or not preset.get("selector_enabled") or not _model_available(preset):
+                self._send_json(400, {"error": {"message": "Model is not configured or available"}})
+                return
+            context_options = preset.get("context_options", [])
+            effort_options = preset.get("reasoning_options", [])
+            if not context_options:
+                context_options = [preset.get("context_tokens", 1_048_576)]
+            selected_effort = selection.get("reasoning_effort", "")
+            if not effort_options and selected_effort:
+                selected_effort = ""
+            if selection.get("context_tokens") not in context_options or (effort_options and selected_effort not in effort_options):
+                self._send_json(400, {"error": {"message": "Unsupported context or reasoning preset"}})
+                return
+            try:
+                SELECTION_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                temporary = SELECTION_FILE.with_suffix(".tmp")
+                temporary.write_bytes(json_bytes({
+                    "model": alias,
+                    "context_tokens": int(selection["context_tokens"]),
+                    "reasoning_effort": selected_effort,
+                }))
+                os.chmod(temporary, 0o600)
+                temporary.replace(SELECTION_FILE)
+            except OSError:
+                self._send_json(500, {"error": {"message": "Could not save model selection"}})
+                return
+            self._send_json(200, {"ok": True, "data": selection})
+            return
         if self.path not in ("/v1/chat/completions", "/chat/completions"):
             self._send_json(404, {"error": {"message": "Not found"}})
             return
@@ -307,6 +424,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": {"message": "Unknown model alias; check config.toml"}})
             return
 
+        preset = _effective_preset(alias, preset)
         protocol = preset.get("protocol", "openai-chat-completions")
         if protocol not in ("openai-chat-completions", "anthropic-messages"):
             self._send_json(501, {"error": {"message": f"Unsupported upstream protocol: {protocol}"}})
