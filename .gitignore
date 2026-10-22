@@ -1,0 +1,10 @@
+.env
+.venv/
+config.toml
+launchd/com.zebao.cursor-model-router.plist
+__pycache__/
+*.py[cod]
+.deepseek-tokenizer.json
+.deepseek-tokenizer-config.json
+service.log
+.DS_Store

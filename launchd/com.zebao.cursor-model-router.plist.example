@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>com.zebao.cursor-model-router</string>
+  <key>ProgramArguments</key><array>
+    <string>/ABSOLUTE/PATH/cursor-model-router/.venv/bin/python</string>
+    <string>/ABSOLUTE/PATH/cursor-model-router/gateway.py</string>
+  </array>
+  <key>WorkingDirectory</key><string>/ABSOLUTE/PATH/cursor-model-router</string>
+  <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>/ABSOLUTE/PATH/cursor-model-router/service.log</string>
+  <key>StandardErrorPath</key><string>/ABSOLUTE/PATH/cursor-model-router/service.log</string>
+</dict></plist>
