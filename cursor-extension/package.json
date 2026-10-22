@@ -1,17 +1,29 @@
 {
   "name": "cursor-model-router-selector",
   "displayName": "Cursor Model Router Selector",
-  "description": "Choose context and reasoning presets for configured Cursor BYOK models.",
-  "version": "0.1.1",
+  "description": "Choose verified context and reasoning profiles for Cursor BYOK models in Editor and Agent.",
+  "version": "0.2.0",
   "publisher": "zebao-local",
-  "engines": { "vscode": "^1.85.0" },
-  "categories": ["Other"],
-  "activationEvents": ["onStartupFinished"],
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
   "main": "./extension.js",
   "contributes": {
     "commands": [
-      { "command": "cursorModelRouter.editProfile", "title": "Cursor Model Router: Edit Model Profile" },
-      { "command": "cursorModelRouter.setToken", "title": "Cursor Model Router: Set Local Router Token" }
+      {
+        "command": "cursorModelRouter.editProfile",
+        "title": "Cursor Model Router: Edit Model Profile"
+      },
+      {
+        "command": "cursorModelRouter.setToken",
+        "title": "Cursor Model Router: Set Local Router Token"
+      }
     ],
     "configuration": {
       "title": "Cursor Model Router",

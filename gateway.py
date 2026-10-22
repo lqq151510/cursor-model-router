@@ -7,6 +7,7 @@ import json
 import hmac
 import os
 from pathlib import Path
+from threading import Lock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tomllib
 from urllib.error import HTTPError, URLError
@@ -18,6 +19,8 @@ CONFIG_PATH = Path(os.environ.get("CURSOR_MODEL_ROUTER_CONFIG", ROOT / "config.t
 ENV_PATH = ROOT / ".env"
 MAX_BODY_BYTES = 64 * 1024 * 1024
 UPSTREAM_TIMEOUT_SECONDS = 300
+ANTHROPIC_TOOL_THINKING: dict[str, list[dict[str, object]]] = {}
+ANTHROPIC_TOOL_THINKING_LOCK = Lock()
 
 
 def _load_env_file() -> None:
@@ -163,27 +166,56 @@ def _read_selection() -> dict[str, object]:
 
 
 def _effective_preset(alias: str, preset: dict[str, object]) -> dict[str, object]:
-    """Apply the locally selected context and reasoning to one base model ID."""
+    """Apply the selected context budget and provider-specific reasoning payload."""
     effective = dict(preset)
     selection = _read_selection()
-    if selection.get("model") != alias:
-        return effective
-
     context_options = preset.get("context_options", [])
-    selected_context = selection.get("context_tokens")
+    selected_context = selection.get("context_tokens") if selection.get("model") == alias else None
     if isinstance(context_options, list) and selected_context in context_options:
         effective["context_tokens"] = int(selected_context)
 
-    effort_options = preset.get("reasoning_options", [])
-    selected_effort = selection.get("reasoning_effort")
-    if isinstance(effort_options, list) and selected_effort in effort_options:
-        if selected_effort == "fast":
-            effective["thinking"] = False
-            effective.pop("reasoning_effort", None)
-        else:
-            effective["thinking"] = True
-            effective["reasoning_effort"] = selected_effort
+    selected_profile = selection.get("reasoning_effort") if selection.get("model") == alias else None
+    profiles = preset.get("reasoning_profiles", {})
+    if not isinstance(profiles, dict) or not profiles:
+        return effective
+    if not isinstance(selected_profile, str) or selected_profile not in profiles:
+        selected_profile = str(preset.get("default_reasoning_effort", ""))
+    profile = profiles.get(selected_profile, {}) if isinstance(profiles, dict) else {}
+    # Remove Cursor-supplied controls before applying the selected profile so
+    # upstream behavior cannot silently diverge from the status-bar selection.
+    for key in ("thinking", "reasoning_effort", "enable_thinking", "output_config"):
+        effective.pop(key, None)
+    if isinstance(profile, dict):
+        effective["selected_reasoning_profile"] = selected_profile
+        effective["reasoning_parameters"] = profile.get("parameters", {})
     return effective
+
+
+def _reasoning_options(preset: dict[str, object]) -> list[dict[str, str]]:
+    profiles = preset.get("reasoning_profiles", {})
+    if not isinstance(profiles, dict):
+        return []
+    return [
+        {
+            "id": str(key),
+            "label": str(value.get("label", key)) if isinstance(value, dict) else str(key),
+            "description": str(value.get("description", "")) if isinstance(value, dict) else "",
+        }
+        for key, value in profiles.items()
+    ]
+
+
+def _apply_reasoning_parameters(body: dict[str, object], preset: dict[str, object]) -> None:
+    """Replace client-supplied controls with the exact selected upstream fields."""
+    if preset.get("reasoning_profiles"):
+        for key in ("thinking", "reasoning_effort", "enable_thinking", "output_config"):
+            body.pop(key, None)
+    parameters = preset.get("reasoning_parameters", {})
+    if isinstance(parameters, dict):
+        body.update(parameters)
+        if preset.get("omit_sampling_parameters"):
+            for key in ("temperature", "top_p", "top_k"):
+                body.pop(key, None)
 
 
 def _anthropic_request(body: dict[str, object], model: str) -> dict[str, object]:
@@ -218,7 +250,16 @@ def _anthropic_request(body: dict[str, object], model: str) -> dict[str, object]
                     elif isinstance(url, str):
                         blocks.append({"type": "image", "source": {"type": "url", "url": url}})
         if role == "assistant":
-            for call in message.get("tool_calls", []) if isinstance(message.get("tool_calls", []), list) else []:
+            calls = message.get("tool_calls", []) if isinstance(message.get("tool_calls", []), list) else []
+            # The OpenAI-compatible conversation only carries tool-call IDs.
+            # Restore the exact signed thinking blocks cached from Anthropic's
+            # preceding response so Claude can continue its tool-use turn.
+            with ANTHROPIC_TOOL_THINKING_LOCK:
+                for call in calls:
+                    call_id = call.get("id", "") if isinstance(call, dict) else ""
+                    if isinstance(call_id, str):
+                        blocks.extend(ANTHROPIC_TOOL_THINKING.pop(call_id, []))
+            for call in calls:
                 fn = call.get("function", {}) if isinstance(call, dict) else {}
                 try:
                     arguments = json.loads(fn.get("arguments", "{}"))
@@ -240,6 +281,8 @@ def _anthropic_request(body: dict[str, object], model: str) -> dict[str, object]
             result[key] = body[key]
     if "stop" in body:
         result["stop_sequences"] = body["stop"]
+    if isinstance(body.get("thinking"), dict):
+        result["thinking"] = body["thinking"]
     if "tools" in body and isinstance(body["tools"], list):
         result["tools"] = [
             {"name": tool.get("function", {}).get("name", ""),
@@ -263,7 +306,42 @@ def _anthropic_request(body: dict[str, object], model: str) -> dict[str, object]
     return result
 
 
+def _cache_anthropic_tool_thinking(payload: dict[str, object]) -> None:
+    """Cache exact Claude thinking blocks by tool-use ID for the next tool turn."""
+    content = payload.get("content", [])
+    if not isinstance(content, list):
+        return
+    thinking_blocks = [
+        dict(block) for block in content
+        if isinstance(block, dict) and block.get("type") in ("thinking", "redacted_thinking")
+    ]
+    if not thinking_blocks:
+        return
+    tool_ids = [
+        block.get("id") for block in content
+        if isinstance(block, dict) and block.get("type") == "tool_use" and isinstance(block.get("id"), str)
+    ]
+    if not tool_ids:
+        return
+    with ANTHROPIC_TOOL_THINKING_LOCK:
+        for tool_id in tool_ids:
+            ANTHROPIC_TOOL_THINKING[tool_id] = thinking_blocks
+        while len(ANTHROPIC_TOOL_THINKING) > 5000:
+            ANTHROPIC_TOOL_THINKING.pop(next(iter(ANTHROPIC_TOOL_THINKING)))
+
+
+def _cache_thinking_for_tool_ids(blocks: list[dict[str, object]], tool_ids: list[str]) -> None:
+    if not blocks or not tool_ids:
+        return
+    with ANTHROPIC_TOOL_THINKING_LOCK:
+        for tool_id in tool_ids:
+            ANTHROPIC_TOOL_THINKING[tool_id] = [dict(block) for block in blocks]
+        while len(ANTHROPIC_TOOL_THINKING) > 5000:
+            ANTHROPIC_TOOL_THINKING.pop(next(iter(ANTHROPIC_TOOL_THINKING)))
+
+
 def _anthropic_to_openai_response(payload: dict[str, object], model_alias: str) -> dict[str, object]:
+    _cache_anthropic_tool_thinking(payload)
     content: list[str] = []
     tool_calls: list[dict[str, object]] = []
     for block in payload.get("content", []) if isinstance(payload.get("content", []), list) else []:
@@ -324,8 +402,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         "label": str(preset.get("display_name", alias)),
                         "context_options": preset.get("context_options", [preset.get("context_tokens", 1_048_576)]),
                         "default_context_tokens": int(preset.get("context_tokens", 1_048_576)),
-                        "reasoning_options": preset.get("reasoning_options", []),
-                        "default_reasoning_effort": preset.get("reasoning_effort", "high") if preset.get("reasoning_options") else "",
+                        "reasoning_options": _reasoning_options(preset),
+                        "default_reasoning_effort": str(preset.get("default_reasoning_effort", "")),
                     })
             self._send_json(200, {"data": profiles})
             return
@@ -369,13 +447,15 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 self._send_json(400, {"error": {"message": "Model is not configured or available"}})
                 return
             context_options = preset.get("context_options", [])
-            effort_options = preset.get("reasoning_options", [])
+            reasoning_profiles = preset.get("reasoning_profiles", {})
             if not context_options:
                 context_options = [preset.get("context_tokens", 1_048_576)]
             selected_effort = selection.get("reasoning_effort", "")
-            if not effort_options and selected_effort:
+            if not isinstance(reasoning_profiles, dict):
+                reasoning_profiles = {}
+            if not reasoning_profiles and selected_effort:
                 selected_effort = ""
-            if selection.get("context_tokens") not in context_options or (effort_options and selected_effort not in effort_options):
+            if selection.get("context_tokens") not in context_options or (reasoning_profiles and selected_effort not in reasoning_profiles):
                 self._send_json(400, {"error": {"message": "Unsupported context or reasoning preset"}})
                 return
             try:
@@ -455,12 +535,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self._send_json(400, {"error": {"message": str(exc), "type": "context_length_exceeded"}})
             return
 
-        if "thinking" in preset and protocol == "openai-chat-completions":
-            body["thinking"] = {"type": "enabled" if preset["thinking"] else "disabled"}
-        if preset.get("reasoning_effort"):
-            body["reasoning_effort"] = preset["reasoning_effort"]
-        elif protocol == "openai-chat-completions":
-            body.pop("reasoning_effort", None)
+        _apply_reasoning_parameters(body, preset)
 
         key_name = str(preset.get("api_key_env", ""))
         api_key = os.environ.get(key_name, "") if key_name else ""
@@ -530,6 +605,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self.wfile.flush()
 
         emit({"delta": {"role": "assistant"}, "finish_reason": None})
+        thinking_blocks: list[dict[str, object]] = []
+        thinking_by_index: dict[int, dict[str, object]] = {}
         for line in response:
             if not line.startswith(b"data:"):
                 continue
@@ -543,14 +620,26 @@ class GatewayHandler(BaseHTTPRequestHandler):
             kind = event.get("type")
             if kind == "content_block_start":
                 block = event.get("content_block", {})
-                if block.get("type") == "tool_use":
+                if block.get("type") in ("thinking", "redacted_thinking"):
+                    retained = dict(block)
+                    thinking_blocks.append(retained)
+                    thinking_by_index[int(event.get("index", 0))] = retained
+                elif block.get("type") == "tool_use":
+                    _cache_thinking_for_tool_ids(thinking_blocks, [str(block.get("id", ""))])
                     emit({"delta": {"tool_calls": [{"index": event.get("index", 0), "id": block.get("id", ""), "type": "function", "function": {"name": block.get("name", ""), "arguments": ""}}]}, "finish_reason": None})
             elif kind == "content_block_delta":
                 delta = event.get("delta", {})
+                active = thinking_by_index.get(int(event.get("index", 0)))
                 if delta.get("type") == "text_delta":
                     emit({"delta": {"content": delta.get("text", "")}, "finish_reason": None})
                 elif delta.get("type") == "thinking_delta":
+                    if active is not None:
+                        active["thinking"] = str(active.get("thinking", "")) + str(delta.get("thinking", ""))
                     emit({"delta": {"reasoning_content": delta.get("thinking", "")}, "finish_reason": None})
+                elif delta.get("type") == "signature_delta" and active is not None:
+                    active["signature"] = str(active.get("signature", "")) + str(delta.get("signature", ""))
+                elif delta.get("type") == "redacted_thinking_delta" and active is not None:
+                    active["data"] = str(active.get("data", "")) + str(delta.get("data", ""))
                 elif delta.get("type") == "input_json_delta":
                     emit({"delta": {"tool_calls": [{"index": event.get("index", 0), "function": {"arguments": delta.get("partial_json", "")}}]}, "finish_reason": None})
             elif kind == "message_delta":

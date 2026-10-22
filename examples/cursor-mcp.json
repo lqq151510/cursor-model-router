@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cursor-model-router": {
+      "command": "python3",
+      "args": ["/ABSOLUTE/PATH/cursor-model-router/mcp_server.py"]
+    }
+  }
+}

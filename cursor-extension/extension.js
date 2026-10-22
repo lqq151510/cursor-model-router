@@ -28,7 +28,15 @@ async function getProfiles() {
 }
 
 function contextLabel(value) {
-  return value >= 1048576 ? `${value / 1048576}M` : `${Math.round(value / 1024)}K`;
+  if (value >= 1000000) return `${Number((value / 1000000).toFixed(2))}M`;
+  return `${Math.round(value / 1024)}K`;
+}
+
+function reasoningLabel(profile, id) {
+  const option = (profile.reasoning_options || []).find(item =>
+    (typeof item === 'string' ? item : item.id) === id
+  );
+  return option ? (typeof option === 'string' ? option : option.label) : (id || '默认');
 }
 
 async function refreshStatus(status) {
@@ -39,9 +47,9 @@ async function refreshStatus(status) {
     const selection = current.data || {};
     const profile = profiles.find(p => p.id === selection.model);
     if (!profile) return;
-    const effort = selection.reasoning_effort || '默认';
+    const effort = reasoningLabel(profile, selection.reasoning_effort || profile.default_reasoning_effort);
     status.text = `$(tune) ${profile.label} · ${contextLabel(selection.context_tokens)} · ${effort}`;
-    status.tooltip = '点击选择模型上下文和思考强度';
+    status.tooltip = '点击选择模型、真实上下文预算和上游思考档位';
   } catch (_) {
     // The gateway may not be running yet; keep the generic status-bar label.
   }
@@ -73,8 +81,9 @@ async function editProfile(status) {
     let effort = model.profile.default_reasoning_effort || '';
     if (efforts.length) {
       const selected = await vscode.window.showQuickPick(efforts.map(value => ({
-        label: value === 'fast' ? 'Fast（关闭思考）' : value,
-        value,
+        label: typeof value === 'string' ? value : value.label,
+        description: typeof value === 'string' ? '' : value.description,
+        value: typeof value === 'string' ? value : value.id,
       })), { title: '选择思考强度' });
       if (!selected) return;
       effort = selected.value;
@@ -84,14 +93,22 @@ async function editProfile(status) {
       method: 'POST',
       body: JSON.stringify({ model: model.profile.id, context_tokens: context.value, reasoning_effort: effort }),
     });
-    status.text = `$(tune) ${model.profile.label} · ${context.label} · ${effort || '默认'}`;
-    status.tooltip = '点击选择模型上下文和思考强度';
+    const effortText = selectedProfileLabel(model.profile, effort);
+    status.text = `$(tune) ${model.profile.label} · ${context.label} · ${effortText || '默认'}`;
+    status.tooltip = '点击选择模型、真实上下文预算和上游思考档位';
     await vscode.window.showInformationMessage(
-      `已设置 ${model.profile.label}：${context.label} / ${effort || '默认思考强度'}。请在 Cursor 模型下拉框选择对应模型。`
+      `已设置 ${model.profile.label}：${context.label} / ${effortText || '模型默认档位'}。请在 Cursor 模型下拉框选择对应模型。`
     );
   } catch (error) {
     await vscode.window.showErrorMessage(`Cursor Model Router: ${error.message}`);
   }
+}
+
+function selectedProfileLabel(profile, id) {
+  const option = (profile.reasoning_options || []).find(item =>
+    (typeof item === 'string' ? item : item.id) === id
+  );
+  return option ? (typeof option === 'string' ? option : option.label) : id;
 }
 
 function activate(context) {
@@ -99,9 +116,11 @@ function activate(context) {
   const status = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
   status.command = 'cursorModelRouter.editProfile';
   status.text = '$(tune) 模型档位';
-  status.tooltip = '选择路由器模型的上下文与思考强度';
+  status.tooltip = '选择模型、真实上下文预算和上游思考档位';
   status.show();
   refreshStatus(status);
+  const refreshTimer = setInterval(() => refreshStatus(status), 3000);
+  context.subscriptions.push({ dispose: () => clearInterval(refreshTimer) });
   context.subscriptions.push(status);
 
   context.subscriptions.push(vscode.commands.registerCommand(
