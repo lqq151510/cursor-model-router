@@ -54,7 +54,7 @@ The quick tunnel URL is temporary and changes when restarted. It is intended for
 4. Build the dependency-free extension package with `python3 scripts/package_cursor_extension.py`, then use Cursor's **Install from VSIX** command to install the generated `.vsix` file.
 5. In the Cursor editor window, click **模型档位** on the status bar (or run **Cursor Model Router: Edit Model Profile**) and choose the model, context, and reasoning effort. Then choose the same base model in Cursor's model picker.
 
-The editor extension keeps the compact picker beside the editor. For Cursor Agent, configure the local MCP server below; Agent can list configured profiles and switch the router selection for subsequent requests. Cursor's built-in Agent model picker still chooses the base model alias, so choose the same model in both places. The router trims oldest complete user turns when needed, while retaining system/developer messages and the latest user turn. If the current prompt itself exceeds the selected budget, the router returns a clear 400 response instead of silently truncating the latest request.
+The editor extension keeps the compact picker beside the editor. For a direct button in the Cursor Agent composer, optionally install the local UI patch with `python3 scripts/patch_cursor_agent_ui.py install` after fully quitting Cursor, then relaunch and click **档位**. It displays an in-window dialog and does not open a browser. Cursor's built-in Agent model picker still chooses the base model alias, so choose the same alias there. The router trims oldest complete user turns when needed, while retaining system/developer messages and the latest user turn. If the current prompt itself exceeds the selected budget, the router returns a clear 400 response instead of silently truncating the latest request.
 
 ## Providers and protocol adapters
 
@@ -121,9 +121,9 @@ These are request-time controls forwarded to each provider API. The router does 
 
 `cursor-extension/` contains a dependency-free VS Code extension that runs in Cursor's editor window. It reads configured profiles from `GET /v1/router/profiles` and writes the selected profile to `POST /v1/router/selection`. The selection endpoint uses the same optional bearer-token check as chat requests. When no API key is configured for a model marked `requires_api_key`, the model is hidden from both the selector and `/v1/models`.
 
-### Cursor Agent MCP control
+### Cursor Agent MCP control (optional fallback)
 
-Agent can change the model-router profile through local MCP tools. Add this server to `~/.cursor/mcp.json` (merge into an existing `mcpServers` object and replace the path with the absolute path to your clone):
+If you do not install the local UI patch, Cursor Agent can open a clickable model profile panel embedded in chat, backed by the local MCP server. Add this server to `~/.cursor/mcp.json` (merge into an existing `mcpServers` object and replace the path with the absolute path to your clone):
 
 ```json
 {
@@ -136,7 +136,7 @@ Agent can change the model-router profile through local MCP tools. Add this serv
 }
 ```
 
-Reload Cursor MCP servers. In Agent, enable `list_cursor_model_profiles` and `set_cursor_model_profile`. Ask Agent to list profiles, then set an available model alias, context budget, and a listed reasoning profile ID. The choice applies to subsequent calls routed through the gateway. Keep the local MCP server available only to trusted local Cursor sessions; provider API keys stay in your router `.env`.
+Reload Cursor MCP servers and enable `open_cursor_model_profile_picker`, `list_cursor_model_profiles`, and `set_cursor_model_profile`. Invoke **Open Model Profile Picker** once from the Agent MCP tools, then select the desired options and click **Save Profile** in the embedded panel. This is an in-chat MCP App, not a separate browser page. Its controls only show configured models and real context/reasoning options. The saved profile applies to subsequent calls routed through the gateway. Keep the local MCP server available only to trusted local Cursor sessions; provider API keys stay in your router `.env`.
 
 ## Run as a macOS LaunchAgent
 
@@ -158,7 +158,8 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.zebao.cursor-model-rou
 - Do not bind to `0.0.0.0` on an untrusted network. Configure `gateway_token_env` before enabling any public tunnel.
 - The router forwards prompts and code to the configured provider, as Cursor would when configured directly.
 - Logs contain request method/path only; never enable HTTP debug logging around credentials or prompts.
-- This project cannot add capabilities that Cursor itself does not expose and does not modify Cursor's application bundle.
+- The optional Agent composer patch modifies only the local Cursor bundle and talks to `127.0.0.1:18881`. See [patch maintenance](PATCHING.md) for code-signature warnings, backups, upgrade steps, and recovery.
+- Never commit or distribute the modified Cursor app or its bundle.
 
 ## Roll back
 

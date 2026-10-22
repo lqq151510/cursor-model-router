@@ -6,9 +6,15 @@ from __future__ import annotations
 import json
 import os
 import sys
+from pathlib import Path
 from typing import Any
 
 import gateway
+
+
+APP_RESOURCE_URI = "ui://cursor-model-router/profile-picker.html"
+APP_RESOURCE_MIME = "text/html;profile=mcp-app"
+APP_RESOURCE_PATH = Path(__file__).with_name("agent_app.html")
 
 
 def _profiles() -> list[dict[str, Any]]:
@@ -57,6 +63,31 @@ def _select_profile(arguments: dict[str, Any]) -> dict[str, Any]:
     return {"model": alias, "context_tokens": int(context), "reasoning_effort": effort}
 
 
+def _current_selection() -> dict[str, Any] | None:
+    try:
+        value = json.loads(gateway.SELECTION_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    return {
+        "model": value.get("model"),
+        "context_tokens": value.get("context_tokens"),
+        "reasoning_effort": value.get("reasoning_effort", ""),
+    }
+
+
+def _picker_data() -> dict[str, Any]:
+    return {"profiles": _profiles(), "current": _current_selection()}
+
+
+def _tool_result(value: Any, text: str | None = None) -> dict[str, Any]:
+    return {
+        "content": [{"type": "text", "text": text or json.dumps(value, ensure_ascii=False)}],
+        "structuredContent": value,
+    }
+
+
 TOOLS = [
     {
         "name": "list_cursor_model_profiles",
@@ -77,6 +108,13 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "open_cursor_model_profile_picker",
+        "title": "打开模型档位面板",
+        "description": "在 Cursor Agent 聊天中打开可点击的模型、上下文和思考强度面板。用户可直接在面板中选择并保存，不需要通过对话设置参数。",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "_meta": {"ui": {"resourceUri": APP_RESOURCE_URI}},
+    },
 ]
 
 
@@ -90,13 +128,34 @@ def handle(message: dict[str, Any]) -> dict[str, Any] | None:
     if method == "initialize":
         result = {
             "protocolVersion": message.get("params", {}).get("protocolVersion", "2024-11-05"),
-            "capabilities": {"tools": {}},
-            "serverInfo": {"name": "cursor-model-router", "version": "0.2.0"},
+            "capabilities": {
+                "tools": {},
+                "resources": {},
+                "extensions": {
+                    "io.modelcontextprotocol/ui": {
+                        "mimeTypes": [APP_RESOURCE_MIME],
+                    },
+                },
+            },
+            "serverInfo": {"name": "cursor-model-router", "version": "0.3.0"},
         }
     elif method == "ping":
         result = {}
     elif method == "tools/list":
         result = {"tools": TOOLS}
+    elif method == "resources/read":
+        params = message.get("params", {})
+        if not isinstance(params, dict) or params.get("uri") != APP_RESOURCE_URI:
+            if request_id is None:
+                return None
+            return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32602, "message": "Unknown resource"}}
+        try:
+            html = APP_RESOURCE_PATH.read_text(encoding="utf-8")
+            result = {"contents": [{"uri": APP_RESOURCE_URI, "mimeType": APP_RESOURCE_MIME, "text": html}]}
+        except OSError as exc:
+            if request_id is None:
+                return None
+            return {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": f"Could not load model profile app: {exc}"}}
     elif method == "tools/call":
         params = message.get("params", {})
         if not isinstance(params, dict):
@@ -106,13 +165,17 @@ def handle(message: dict[str, Any]) -> dict[str, Any] | None:
         try:
             if name == "list_cursor_model_profiles":
                 content = _profiles()
+                result = _tool_result(content)
             elif name == "set_cursor_model_profile":
                 if not isinstance(arguments, dict):
                     raise ValueError("Tool arguments must be an object")
                 content = _select_profile(arguments)
+                result = _tool_result(content, "模型档位已保存。")
+            elif name == "open_cursor_model_profile_picker":
+                content = _picker_data()
+                result = _tool_result(content, "请在下方模型档位面板中选择并保存。")
             else:
                 raise ValueError("Unknown tool")
-            result = {"content": [{"type": "text", "text": json.dumps(content, ensure_ascii=False)}]}
         except (OSError, TypeError, ValueError) as exc:
             result = {"isError": True, "content": [{"type": "text", "text": str(exc)}]}
     else:

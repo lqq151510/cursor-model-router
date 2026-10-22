@@ -54,7 +54,7 @@ Cloudflare 临时隧道地址重启后会改变，只适合测试。长期使用
 4. 运行 `python3 scripts/package_cursor_extension.py` 构建扩展，然后用 Cursor 的 **Install from VSIX** 命令安装生成的 `.vsix` 文件。
 5. 在 Cursor 编辑器状态栏点击 **模型档位**，或执行 **Cursor Model Router: Edit Model Profile**，选择模型、上下文预算和该模型支持的思考档位。随后在 Cursor 模型列表中选择相同的基础模型。
 
-编辑器扩展会在编辑器窗口提供紧凑档位选择。Cursor Agent 可通过下面的本地 MCP 工具列出模型并切换网关档位；Agent 内置模型列表仍负责选择基础模型，请在两处选择相同模型。档位切换会影响后续经过网关的请求。网关在超限时会删除最旧的完整对话轮次，并保留系统/开发者消息和最新用户轮次；如果最新请求本身仍超限，会返回 400，而不会静默截断它。
+编辑器扩展会在编辑器窗口提供紧凑档位选择。若要在 Cursor Agent 窗口直接点击调节，可选择安装本机客户端补丁：完全退出 Cursor 后运行 `python3 scripts/patch_cursor_agent_ui.py install`，重新打开 Cursor 后在 Agent 输入框旁点击“档位”。此补丁在 Agent 窗口内显示选择框，不打开网页。Agent 自带模型菜单仍负责选择基础模型，请选与路由器相同的模型别名。档位切换会影响后续经过网关的请求。网关在超限时会删除最旧的完整对话轮次，并保留系统/开发者消息和最新用户轮次；如果最新请求本身仍超限，会返回 400，而不会静默截断它。
 
 ## 模型与协议适配
 
@@ -122,9 +122,9 @@ max_output_tokens = 128000
 
 `cursor-extension/` 是无需第三方依赖的 VS Code 扩展，可运行在 Cursor 编辑器窗口。它从 `GET /v1/router/profiles` 读取可用配置，并通过 `POST /v1/router/selection` 保存选择。选择接口使用与聊天请求相同的可选 Bearer 校验。标记为 `requires_api_key` 的模型在没有对应密钥时会同时从扩展和 `/v1/models` 中隐藏。
 
-### Cursor Agent 的 MCP 控制
+### Cursor Agent 的 MCP 控制（可选备用方式）
 
-Agent 可通过本机 MCP 工具切换路由器档位。将以下内容合并到 `~/.cursor/mcp.json` 现有的 `mcpServers` 对象中，并把路径替换为你克隆仓库的绝对路径：
+不安装客户端补丁时，Cursor Agent 也可通过本机 MCP 在聊天中打开可点击的档位面板。将以下内容合并到 `~/.cursor/mcp.json` 现有的 `mcpServers` 对象中，并把路径替换为你克隆仓库的绝对路径：
 
 ```json
 {
@@ -137,7 +137,7 @@ Agent 可通过本机 MCP 工具切换路由器档位。将以下内容合并到
 }
 ```
 
-重新加载 Cursor MCP 服务。在 Agent 中启用 `list_cursor_model_profiles` 和 `set_cursor_model_profile`。先让 Agent 列出档位，再指定可用模型别名、上下文 token 数和该模型列出的思考档位 ID。选择将作用于后续通过网关的请求。MCP 服务仅在本机 stdio 运行，不接收或返回 API Key；请只在可信的 Cursor 会话中启用它。
+重新加载 Cursor MCP 服务，并启用 `open_cursor_model_profile_picker`、`list_cursor_model_profiles` 和 `set_cursor_model_profile`。在 Agent 的 MCP 工具列表中调用一次 **打开模型档位面板**，之后直接在聊天内的面板点选模型、上下文和思考强度，再点击 **保存档位**。这是嵌入聊天的 MCP App，不会打开单独的浏览器网页。控件只显示已配置模型及其真实支持的选项；保存后应用于后续通过网关的请求。MCP 服务仅在本机 stdio 运行，不接收或返回 API Key；请只在可信的 Cursor 会话中启用它。
 
 ## macOS LaunchAgent
 
@@ -159,7 +159,10 @@ launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.zebao.cursor-model-rou
 - 不要在不可信网络上绑定 `0.0.0.0`。公网隧道必须先设置 `gateway_token_env`。
 - 网关会把提示词和代码发送到你配置的厂商，和直接配置该厂商 API 的数据流一致。
 - 日志只记录请求方法和路径；不要打开会记录密钥或提示词的调试日志。
-- 本项目不能为 Cursor 本身未开放的地方增加原生控件，也不会修改 Cursor 应用程序包。
+- Agent 窗口补丁只访问回环地址 `127.0.0.1:18881`；若网关开启鉴权，令牌只保存在当前 Agent 窗口的会话存储中，关闭窗口即清除。
+- Agent UI 补丁修改 Cursor 已签名的应用资源，会使代码签名校验失效。macOS 可能提示应用受损或拒绝启动；补丁脚本会在应用支持目录保存带校验值的原版备份，并提供 `uninstall` 回滚。是否安装由使用者自行决定。
+- Cursor 更新会覆盖补丁。升级后先运行 `python3 scripts/patch_cursor_agent_ui.py status`；若显示未安装，再阅读 [补丁维护说明](PATCHING.md) 并核对新版本适配。脚本找不到唯一锚点时会停止，绝不盲目写入。
+- 本补丁仅修改本机 Cursor，不应把修改后的 Cursor 应用包或其构建文件提交、分发到 GitHub。
 
 ## 回滚
 

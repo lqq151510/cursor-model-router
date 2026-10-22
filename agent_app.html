@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>模型档位</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      font: 13px/1.45 var(--font-sans, -apple-system, BlinkMacSystemFont, sans-serif);
+      color: var(--color-text-primary, CanvasText);
+      background: var(--color-background-primary, Canvas);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; padding: 16px; }
+    main { width: min(100%, 520px); margin: 0 auto; }
+    h1 { margin: 0 0 4px; font-size: 16px; font-weight: 600; }
+    .hint { margin: 0 0 16px; color: var(--color-text-secondary, GrayText); }
+    label { display: block; margin: 13px 0 5px; font-weight: 600; }
+    select, button {
+      width: 100%; min-height: 36px; border: 1px solid var(--color-border-primary, #8886);
+      border-radius: 7px; padding: 7px 10px; color: inherit;
+      background: var(--color-background-secondary, Canvas);
+      font: inherit;
+    }
+    button { margin-top: 15px; border: 0; color: var(--color-text-on-accent, white); background: var(--color-accent, #635bff); font-weight: 600; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: default; }
+    #status { min-height: 20px; margin: 9px 0 0; color: var(--color-text-secondary, GrayText); }
+    #status.error { color: var(--color-text-danger, #d33); }
+    .summary { margin-top: 12px; padding: 9px 10px; border-radius: 7px; background: var(--color-background-secondary, #8881); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>模型档位</h1>
+    <p class="hint">在 Agent 窗口直接选择模型、上下文长度和思考强度。</p>
+    <label for="model">模型</label>
+    <select id="model" disabled><option>正在读取可用模型…</option></select>
+    <label for="context">上下文长度</label>
+    <select id="context" disabled></select>
+    <label for="effort">思考强度 / 模式</label>
+    <select id="effort" disabled></select>
+    <button id="save" type="button" disabled>保存档位</button>
+    <p id="status" role="status" aria-live="polite">等待 Cursor Agent 连接…</p>
+    <div id="summary" class="summary" hidden></div>
+  </main>
+  <script>
+    (() => {
+      const modelSelect = document.getElementById('model');
+      const contextSelect = document.getElementById('context');
+      const effortSelect = document.getElementById('effort');
+      const saveButton = document.getElementById('save');
+      const status = document.getElementById('status');
+      const summary = document.getElementById('summary');
+      const pending = new Map();
+      let nextId = 1;
+      let profiles = [];
+      let current = null;
+
+      function request(method, params = {}) {
+        const id = nextId++;
+        const promise = new Promise((resolve, reject) => {
+          const timeout = setTimeout(() => {
+            pending.delete(id);
+            reject(new Error('Cursor 没有响应，请重新打开档位面板。'));
+          }, 15000);
+          pending.set(id, { resolve, reject, timeout });
+        });
+        window.parent.postMessage({ jsonrpc: '2.0', id, method, params }, '*');
+        return promise;
+      }
+
+      function setStatus(message, isError = false) {
+        status.textContent = message;
+        status.classList.toggle('error', isError);
+      }
+
+      function addOptions(select, items, selectedValue, format) {
+        select.replaceChildren();
+        for (const item of items) {
+          const option = document.createElement('option');
+          const value = typeof item === 'object' ? item.id : item;
+          option.value = String(value);
+          option.textContent = format(item);
+          option.selected = String(value) === String(selectedValue);
+          select.append(option);
+        }
+      }
+
+      function selectedProfile() {
+        return profiles.find(profile => profile.id === modelSelect.value);
+      }
+
+      function contextLabel(value) {
+        const tokens = Number(value);
+        return tokens >= 1_000_000 ? `${tokens / 1_000_000}M` : `${tokens / 1024}K`;
+      }
+
+      function effortLabel(value) {
+        const id = typeof value === 'string' ? value : value.id;
+        const labels = {
+          fast: '快速（fast）',
+          none: '非思考（none）',
+          thinking: '思考（thinking）',
+          'non-thinking': '非思考（non-thinking）',
+          low: '低（low）',
+          medium: '中（medium）',
+          high: '高（high）',
+          xhigh: '超高（xhigh）',
+          max: '最高（max）',
+        };
+        if (labels[id]) return labels[id];
+        const label = typeof value === 'string' ? value : value.label;
+        return typeof value === 'string' ? label : `${label}${value.description ? ` · ${value.description}` : ''}`;
+      }
+
+      function populate(modelId, contextTokens, effortId) {
+        const profile = selectedProfile();
+        if (!profile) return;
+        addOptions(contextSelect, profile.context_options, contextTokens ?? profile.default_context_tokens,
+          contextLabel);
+        const efforts = profile.reasoning_options || [];
+        addOptions(effortSelect, efforts, effortId ?? profile.default_reasoning_effort,
+          effortLabel);
+        modelSelect.value = profile.id;
+        contextSelect.disabled = false;
+        effortSelect.disabled = false;
+        saveButton.disabled = false;
+      }
+
+      function render(data) {
+        if (!data || !Array.isArray(data.profiles)) throw new Error('没有读取到已配置模型。');
+        profiles = data.profiles;
+        current = data.current || null;
+        if (!profiles.length) {
+          modelSelect.replaceChildren(new Option('没有已配置 API Key 的模型', ''));
+          setStatus('请先在本地网关配置模型和 API Key。', true);
+          return;
+        }
+        addOptions(modelSelect, profiles, current?.model || profiles[0].id,
+          profile => `${profile.label}（${profile.id}）`);
+        const profile = selectedProfile();
+        populate(profile.id,
+          current?.model === profile.id ? current.context_tokens : profile.default_context_tokens,
+          current?.model === profile.id ? current.reasoning_effort : profile.default_reasoning_effort);
+        setStatus(current ? '已加载当前档位；选择后点击“保存档位”即可生效。' : '已加载可用档位；选择后点击“保存档位”即可生效。');
+        summary.hidden = !current;
+        if (current) summary.textContent = `当前：${current.model} · ${contextLabel(current.context_tokens)} · ${current.reasoning_effort ? effortLabel(current.reasoning_effort) : '模型默认思考设置'}`;
+      }
+
+      window.addEventListener('message', event => {
+        if (event.source !== window.parent) return;
+        const message = event.data;
+        if (!message || message.jsonrpc !== '2.0') return;
+        if (message.id !== undefined && pending.has(message.id)) {
+          const entry = pending.get(message.id);
+          clearTimeout(entry.timeout);
+          pending.delete(message.id);
+          if (message.error) entry.reject(new Error(message.error.message || 'Cursor 调用失败。'));
+          else entry.resolve(message.result);
+          return;
+        }
+        if (message.method === 'ui/notifications/tool-result') {
+          const data = message.params?.structuredContent;
+          if (data?.profiles) {
+            try { render(data); } catch (error) { setStatus(error.message, true); }
+          }
+        } else if (message.method === 'ui/resource-teardown' && message.id !== undefined) {
+          window.parent.postMessage({ jsonrpc: '2.0', id: message.id, result: {} }, '*');
+        }
+      });
+
+      modelSelect.addEventListener('change', () => populate(modelSelect.value));
+      saveButton.addEventListener('click', async () => {
+        const profile = selectedProfile();
+        if (!profile) return;
+        saveButton.disabled = true;
+        setStatus('正在保存…');
+        try {
+          const result = await request('tools/call', {
+            name: 'set_cursor_model_profile',
+            arguments: {
+              model: profile.id,
+              context_tokens: Number(contextSelect.value),
+              reasoning_effort: effortSelect.value,
+            },
+          });
+          if (result?.isError) throw new Error(result.content?.[0]?.text || '保存失败。');
+          current = { model: profile.id, context_tokens: Number(contextSelect.value), reasoning_effort: effortSelect.value };
+          summary.textContent = `当前：${current.model} · ${contextLabel(current.context_tokens)} · ${current.reasoning_effort ? effortLabel(current.reasoning_effort) : '模型默认思考设置'}`;
+          summary.hidden = false;
+          setStatus('已保存；后续经由网关发送的请求将使用此档位。');
+        } catch (error) {
+          setStatus(error.message || '保存失败，请重试。', true);
+        } finally {
+          saveButton.disabled = false;
+        }
+      });
+
+      request('ui/initialize', {
+        appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] },
+        appInfo: { name: 'Cursor Model Router Profile Picker', version: '0.3.0' },
+        protocolVersion: '2026-01-26',
+      }).then(() => {
+        window.parent.postMessage({ jsonrpc: '2.0', method: 'ui/notifications/initialized', params: {} }, '*');
+      }).catch(error => setStatus(error.message, true));
+    })();
+  </script>
+</body>
+</html>
