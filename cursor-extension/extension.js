@@ -36,7 +36,22 @@ function reasoningLabel(profile, id) {
   const option = (profile.reasoning_options || []).find(item =>
     (typeof item === 'string' ? item : item.id) === id
   );
-  return option ? (typeof option === 'string' ? option : option.label) : (id || '默认');
+  return option ? localizedReasoningName(id, typeof option === 'string' ? option : option.label) : (id || '默认');
+}
+
+function localizedReasoningName(id, fallback = id) {
+  const labels = {
+    fast: '快速（关闭思考）',
+    none: '非思考',
+    thinking: '思考',
+    'non-thinking': '非思考',
+    low: '低（low）',
+    medium: '中（medium）',
+    high: '高（high）',
+    xhigh: '超高（xhigh）',
+    max: '最高（max）',
+  };
+  return labels[id] || fallback;
 }
 
 async function refreshStatus(status) {
@@ -81,7 +96,7 @@ async function editProfile(status) {
     let effort = model.profile.default_reasoning_effort || '';
     if (efforts.length) {
       const selected = await vscode.window.showQuickPick(efforts.map(value => ({
-        label: typeof value === 'string' ? value : value.label,
+        label: localizedReasoningName(typeof value === 'string' ? value : value.id, typeof value === 'string' ? value : value.label),
         description: typeof value === 'string' ? '' : value.description,
         value: typeof value === 'string' ? value : value.id,
       })), { title: '选择思考强度' });
@@ -108,7 +123,7 @@ function selectedProfileLabel(profile, id) {
   const option = (profile.reasoning_options || []).find(item =>
     (typeof item === 'string' ? item : item.id) === id
   );
-  return option ? (typeof option === 'string' ? option : option.label) : id;
+  return option ? localizedReasoningName(id, typeof option === 'string' ? option : option.label) : id;
 }
 
 function activate(context) {

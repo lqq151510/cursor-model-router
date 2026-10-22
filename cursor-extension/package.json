@@ -2,7 +2,7 @@
   "name": "cursor-model-router-selector",
   "displayName": "Cursor Model Router Selector",
   "description": "Choose verified context and reasoning profiles for Cursor BYOK models in Editor and Agent.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "zebao-local",
   "engines": {
     "vscode": "^1.85.0"
